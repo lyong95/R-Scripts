@@ -1,0 +1,366 @@
+## -----------------------------------------------------------------------------
+
+#install.packages("tidyverse")
+#install.packages("janitor")
+#install.packages("factoextra")
+
+
+library(tidyverse)
+library(janitor)
+library(dplyr)
+library(NbClust) 
+library(factoextra)
+library(RColorBrewer)
+library(readxl)
+
+## ---- message=FALSE-----------------------------------------------------------
+
+user = "lyong"
+
+if (user == "lyong") {
+  
+  data_path = "/Users/lyong/Desktop/projects/Pre-screen 1 - 17-03-2020/natural isolates 17-03-2020"
+
+  
+} else if (user == "fhuber") {
+  
+  data_path = "path"
+  
+} else if (user == "ttreis") {
+  
+  data_path = "/shared_data/google-drive/Projekte/typa_2020_louyan_biofilm/"
+  
+}
+
+setwd(data_path)
+
+## -----------------------------------------------------------------------------
+## ---- message=FALSE-----------------------------------------------------------
+iris_files <- list.files(path = "R1-R8 iris output", pattern = "*.iris$", recursive = TRUE, 
+                         full.names = TRUE)
+# testfile <- iris_files[1]
+# testsample <- "R1_10"
+
+##-- Reading files and joining all data -----------------------------------------------------------------
+# read all iris output files into a list and add sample information
+tab <- map(iris_files, function(x) {
+  tab <- read_tsv(x, skip = 6, locale = locale(decimal_mark = ","))
+  # to extract info like R1_10 etc. from filename
+  tab$file <- basename(x)
+  # sample_id is of the form RX_YZ (plate number and condition number)
+  tab$sample_id <- str_extract(tab$file, "R\\d{1,2}_\\d{1,2}")
+  # get plate number and condition number
+  tab$plt <- str_extract(tab$sample_id, "R\\d{1,2}")
+  tab$cond_id <- str_extract(tab$sample_id, "\\d{1,2}$")
+  # get position on plate from 1 to 384
+  tab$pos <- seq_len(nrow(tab))
+  # get "genotype" - combination of plate number and position
+  tab$genotype <- paste(tab$plt, tab$pos, sep = "-")
+  tab <- clean_names(tab)
+  return(tab)
+})
+
+
+## -----------------------------------------------------------------------------
+# expected number of columns
+n_cols_exptd <- 24
+tab[lengths(tab) != n_cols_exptd]
+
+
+## -----------------------------------------------------------------------------
+tab <- tab[lengths(tab) == n_cols_exptd]
+tab <- do.call(bind_rows, tab)
+
+# add strain information from provided Excel file
+strains <- read_xlsx("Natural isolates new layout.xlsx", range = "D1:G3073")
+names(strains) <- c("strain", "plt", "column", "row")
+strains$plt <- paste0("R", strains$plt)
+tab$row <- LETTERS[tab$row]
+tab <- left_join(tab, strains)
+
+## -----------------------------------------------------------------------------
+chemicals <- c("LB", "EtOH_1.4%", "gluc_0.5%", "gluc_1%", "bipyridyl_75µM", "bipyridyl_200µM", "FeCl3_100µM")
+
+conditions <- tibble(
+  cond_id = as.character(3:16), 
+  condition = c(
+    chemicals, 
+    paste(chemicals, "no_salt", sep = "_")
+  )
+)
+
+(tab <- left_join(tab, conditions))
+
+
+## -----------------------------------------------------------------------------
+unique(tab$condition)
+
+
+## -----------------------------------------------------------------------------
+length(unique(tab$genotype))
+
+
+## -----------------------------------------------------------------------------
+cols_to_keep <- c("row", "column", "normalized_morphology_score", "brightness_corrected_size_normalized_color_intensity", 
+                  "file", "sample_id", "plt", "cond_id", "pos", "genotype", "condition", "strain")
+(subtab <- select(tab, all_of(cols_to_keep)))
+
+
+## -----------------------------------------------------------------------------
+ggplot(subtab, aes(x = log(normalized_morphology_score), y = brightness_corrected_size_normalized_color_intensity)) + 
+  geom_point(alpha = 0.05) + 
+  facet_wrap( ~ condition)
+
+
+## -----------------------------------------------------------------------------
+subtab$has_salt <- !grepl(pattern = "no_salt", x = subtab$condition)
+unique(subtab$condition[subtab$has_salt])
+unique(subtab$condition[!subtab$has_salt])
+
+# We need a "secondary condition id" to match salt and no salt conditions 
+uniq_conds <- sort(unique(subtab$condition))
+helper_id <- rep(seq_len(length(unique(subtab$condition)) / 2), each = 2)
+names(helper_id) <- uniq_conds
+
+subtab$helper_id <- helper_id[subtab$condition]
+
+subtab_salt <- subtab[subtab$has_salt, ]
+subtab_no_salt <- subtab[!subtab$has_salt, ]
+
+
+## -----------------------------------------------------------------------------
+dim(subtab_salt)
+dim(subtab_no_salt)
+
+
+## -----------------------------------------------------------------------------
+join_by <- c("row", "column", "pos", "genotype", "plt", "helper_id")
+
+subtab_salt_comp <- inner_join(x = subtab_salt, subtab_no_salt, by = join_by, 
+                               suffix = c(".salt", ".no_salt"))
+
+dim(subtab_salt_comp)
+
+
+## -----------------------------------------------------------------------------
+p1 <- ggplot(subtab_salt_comp, aes(x = log(normalized_morphology_score.salt), y = log(normalized_morphology_score.no_salt))) + 
+  geom_point(alpha = 0.05) + 
+  geom_abline(slope = 1, colour = "blue") + 
+  coord_fixed() + 
+  facet_wrap( ~ condition.salt)
+
+p1
+
+ggsave(filename = "Salt-vs-no_salt_morph-score.pdf", plot = p1, width = 8, height = 8)
+
+
+## -----------------------------------------------------------------------------
+p2 <- p1 %+% aes(x = brightness_corrected_size_normalized_color_intensity.salt, y = brightness_corrected_size_normalized_color_intensity.no_salt)
+p2 
+
+ggsave(filename = "Salt-vs-no_salt_size.pdf", plot = p2, width = 8, height = 8)
+
+
+## -----------------------------------------------------------------------------
+plt_eff_hist <- ggplot(tab, aes(x = log(normalized_morphology_score))) + 
+  geom_histogram(aes(fill = plt), binwidth = 0.1) + 
+  facet_grid(plt ~ condition)
+
+plt_eff_hist
+
+ggsave(filename = "Plt_effects_hist_morph.pdf", plot = plt_eff_hist, width = 30, height = 25)
+
+
+## -----------------------------------------------------------------------------
+plt_eff_pos <- ggplot(tab, aes(fill = log(normalized_morphology_score))) + 
+  geom_tile(aes(x = column, y = row)) + 
+  facet_grid(plt ~ condition)
+
+plt_eff_pos
+
+ggsave(filename = "Plt_effects_morph-score.pdf", plot = plt_eff_pos, width = 30, height = 18)
+
+
+## -----------------------------------------------------------------------------
+plt_eff_pos2 <- plt_eff_pos %+% aes(fill = brightness_corrected_size_normalized_color_intensity)
+
+ggsave(filename = "Plt_effects_size.pdf", plt_eff_pos2, width = 30, height = 18)
+
+## -----------------------------------------------------------------------------
+## Transfer colors -------------------------------------------------------------
+
+transfer_cluster_colors = function(data, from_cond, to_cond, k, n_sd) {
+  
+  try(dev.off(dev.list()["RStudioGD"]),silent=TRUE)
+  try(dev.off(),silent=TRUE)
+  
+  plot.new()
+  par(mfrow=c(1,2))
+  
+  euc.dist <- function(x1, x2) sqrt(sum((x1 - x2) ^ 2))
+  
+  colors = brewer.pal(n = k, name = "Set2")
+  
+  from_data = subtab %>% filter(condition == from_cond)
+  to_data = subtab %>% filter(condition == to_cond)
+  
+  distances = c()
+  
+  for (genotype in from_data$genotype) {
+    
+    dist = ((from_data[from_data$genotype == genotype,]$normalized_morphology_score - 
+               to_data[to_data$genotype == genotype,]$normalized_morphology_score)**2 + 
+              (from_data[from_data$genotype == genotype,]$brightness_corrected_size_normalized_color_intensity - 
+                 to_data[to_data$genotype == genotype,]$brightness_corrected_size_normalized_color_intensity)**2)**0.5
+    
+    distances = c(distances, dist)
+    
+  }
+  
+  to_data %>% add_column(dist = distances)
+  
+  dist_mean = mean(distances)
+  dist_sd = sd(distances)
+  
+  res.hc = select(lb_data, contains("normalized")) %>%
+    scale() %>%
+    eclust("hclust", k = k, graph = FALSE)
+  
+  from_colors = c()
+  to_colors = c()
+  i= 1
+  
+  for (dist in distances) {
+    
+    if (dist >= (dist_mean + n_sd * dist_sd)) {
+      
+      to_colors = c(to_colors, colors[res.hc$cluster[i]])
+      
+    } else {
+      
+      to_colors = c(to_colors, "#ffffff00")
+      
+    }
+    
+    from_colors = c(from_colors, colors[res.hc$cluster[i]])
+    i = i + 1
+    
+  }
+  
+  plot(normalized_morphology_score ~ brightness_corrected_size_normalized_color_intensity, 
+       data=from_data,
+       col="white",
+       main=from_cond,
+       xlab="Brightness",
+       ylab="Morphology")
+  text(normalized_morphology_score ~ brightness_corrected_size_normalized_color_intensity, 
+       # labels=(from_data %>% unite("pos", row:column, remove = FALSE))$pos, 
+       labels=from_data$genotype,
+       data=from_data, 
+       col=from_colors,
+       cex=0.9, 
+       font=2)
+  
+  
+  
+  plot(normalized_morphology_score ~ brightness_corrected_size_normalized_color_intensity, 
+       data=to_data,
+       col="white",
+       main=to_cond,
+       xlab="Brightness",
+       ylab="Morphology")
+  text(normalized_morphology_score ~ brightness_corrected_size_normalized_color_intensity, 
+       # labels=(todata %>% unite("pos", row:column, remove = FALSE))$pos, 
+       labels=to_data$genotype,
+       data=to_data, 
+       col=to_colors,
+       cex=0.9, 
+       font=2)
+  
+}
+transfer_cluster_colors(subtab, "LB", "EtOH_1.4%", 5, n_sd=3)
+
+
+# Prepare matrix for avoiding useless comparisons
+
+comparison_matrix = matrix(data=1, 
+                           nrow=length(unique(subtab$condition)), 
+                           ncol=length(unique(subtab$condition)))
+
+for (i in 1:length(unique(subtab$condition))) {
+  
+  for (j in i:length(unique(subtab$condition))) {
+    
+    comparison_matrix[i, j] = FALSE 
+    
+  }
+  
+}
+comparison_matrix
+
+rownames(comparison_matrix) = unique(subtab$condition)
+colnames(comparison_matrix) = unique(subtab$condition)
+
+ranked_genotypes = as.list(rep(0, length(unique(subtab$genotype))))
+names(ranked_genotypes) = unique(subtab$genotype)
+
+
+# ranked_genotypes %>%
+#   mutate(Count=replace(mpg, cyl==4, NA)) %>%
+#   as.data.frame()
+
+comparisons_made = 0
+
+for (cond_row in unique(subtab$condition)) {
+  
+  for (cond_col in unique(subtab$condition)) {
+    
+    if (comparison_matrix[cond_row, cond_col] == 1) {
+      
+      print(c(cond_row, cond_col))
+      
+      from_data = subtab %>% filter(condition == cond_row)
+      to_data = subtab %>% filter(condition == cond_col)
+      
+      distances = c()
+      
+      for (genotype in from_data$genotype) {
+        
+        dist = ((from_data[from_data$genotype == genotype,]$normalized_morphology_score - 
+                   to_data[to_data$genotype == genotype,]$normalized_morphology_score)**2 + 
+                  (from_data[from_data$genotype == genotype,]$brightness_corrected_size_normalized_color_intensity - 
+                     to_data[to_data$genotype == genotype,]$brightness_corrected_size_normalized_color_intensity)**2)**0.5
+        
+        distances = c(distances, dist)
+        
+      }
+      
+      to_data = to_data %>% add_column(dist = distances)
+      
+      subset_best = to_data %>% arrange(desc(dist)) %>% head(100)
+      
+      for (genotype in subset_best$genotype) {
+        
+        ranked_genotypes[genotype] = ranked_genotypes[genotype][[1]] + 1
+        
+      }
+      
+      comparisons_made = comparisons_made + 1
+      
+    }
+    
+  }
+  
+}
+
+ranked_genotypes = as_tibble(ranked_genotypes)
+
+# https://stackoverflow.com/questions/42790219/how-do-i-transpose-a-tibble-in-r
+ranked_genotypes = ranked_genotypes %>%
+  gather(key = var_name, value = value, 2:ncol(ranked_genotypes)) %>% 
+  spread_(key = names(ranked_genotypes)[1],value = 'value')
+colnames(ranked_genotypes) = c("Genotype", "Count")
+
+knitr::kable(ranked_genotypes %>% mutate(Count = Count/comparisons_made) %>% arrange(desc(Count)) %>% head(20))
+
+
